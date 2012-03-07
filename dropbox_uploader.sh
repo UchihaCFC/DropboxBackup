@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# Dropbox Uploader Script v0.8.2
+# Dropbox Uploader Script v0.9.3
 #
-# Copyright (C) 2010-2011 Andrea Fabrizi <andrea.fabrizi@gmail.com>
+# Copyright (C) 2010-2012 Andrea Fabrizi <andrea.fabrizi@gmail.com>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -18,43 +18,35 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #
-
-#DROPBOX ACCOUNT
-#For security reasons, it is not recommended to modify this script
-#to hardcode a login and password.  However, this can be done if
-#automation is necessary.
-LOGIN_EMAIL=""
-LOGIN_PASSWD=""
-
 #Set to 1 to enable DEBUG mode
 DEBUG=0
 
-#Set to 1 to enable VERBOSE mode (-v option)
-VERBOSE=0
+#Set to 1 to enable VERBOSE mode
+VERBOSE=1
 
-#If set to 1 the script terminate if an upload error occurs
-END_ON_UPLOAD_ERROR=0
-
-#Set to 1 to skip the initial login page loading (Speed up the uploading process).
-#Set to 0 if you experience problems uploading the files.
-SKIP_LOADING_LOGIN_PAGE=1
+#Default configuration file
+CONFIG_FILE=~/.dropbox_uploader
 
 #Don't edit these...
-LOGIN_URL="https://www.dropbox.com/login"
-HOME_URL="https://www.dropbox.com/home"
-UPLOAD_URL="https://dl-web.dropbox.com/upload"
-COOKIE_FILE="/tmp/du_cookie_$RANDOM"
+API_REQUEST_TOKEN_URL="https://api.dropbox.com/1/oauth/request_token"
+API_USER_AUTH_URL="https://www2.dropbox.com/1/oauth/authorize"
+API_ACCESS_TOKEN_URL="https://api.dropbox.com/1/oauth/access_token"
+API_UPLOAD_URL="https://api-content.dropbox.com/1/files_put/dropbox"
+API_DOWNLOAD_URL="https://api-content.dropbox.com/1/files/dropbox"
+API_INFO_URL="https://api.dropbox.com/1/account/info"
+APP_CREATE_URL="https://www2.dropbox.com/developers/apps"
 RESPONSE_FILE="/tmp/du_resp_$RANDOM"
-BIN_DEPS="curl sed grep tr pwd"
-VERSION="0.8.2"
+BIN_DEPS="curl sed basename"
+VERSION="0.9.3"
+
+umask 077
 
 if [ $DEBUG -ne 0 ]; then
     set -x
-    COOKIE_FILE="/tmp/du_cookie_debug"
     RESPONSE_FILE="/tmp/du_resp_debug"
 fi
 
-#Print verbose information depend on $VERBOSE variable
+#Print verbose information depends on $VERBOSE variable
 function print
 {
     if [ $VERBOSE -eq 1 ]; then
@@ -62,86 +54,43 @@ function print
     fi
 }
 
+#Returns unix timestamp
+function utime
+{
+    echo $(date +%s)
+}
+
 #Remove temporary files
 function remove_temp_files
 {
     if [ $DEBUG -eq 0 ]; then
-        rm -fr $COOKIE_FILE
         rm -fr $RESPONSE_FILE
     fi
 }
 
-#Extract token from the specified form
-# $1 = file path
-# $2 = form action
-function get_token
+#Replace spaces
+function urlencode
 {
-    TOKEN=$(cat $1 | tr -d '\n' | sed 's/.*<form action="'$2'"[^>]*>\s*<input type="hidden" name="t" value="\([a-z 0-9]*\)".*/\1/')
-    echo $TOKEN
+    str=$1
+    echo ${str// /%20}
 }
 
-#Upload a single file to dropbox
-# $1 = local file path
-# $2 = remote destination folder
-function dropbox_upload
-{
-    UPLOAD_FILE=$1
-    DEST_FOLDER=$2
+#USAGE
+function usage() {
+    echo -e "Dropbox Uploader v$VERSION"
+    echo -e "Andrea Fabrizi - andrea.fabrizi@gmail.com\n"
+    echo -e "Usage: $0 COMMAND [PARAMETERS]..."
+    echo -e "\nCommands:"
     
-    print " > Uploading '$UPLOAD_FILE' to 'DROPBOX$DEST_FOLDER'..."
-
-    #Show the progress bar during the file upload
-    if [ $VERBOSE -eq 1 ]; then
-    	CURL_PARAMETERS="--progress-bar"
-    	print "\n"
-    else
-    	CURL_PARAMETERS="-s --show-error"
-    fi
-
-    curl $CURL_PARAMETERS -i -b $COOKIE_FILE -o $RESPONSE_FILE -F "plain=yes" -F "dest=$DEST_FOLDER" -F "t=$TOKEN" -F "file=@$UPLOAD_FILE"  "$UPLOAD_URL"
-    grep "HTTP/1.1 302 FOUND" "$RESPONSE_FILE" > /dev/null
-
-    if [ $? -ne 0 ]; then
-        print " Failed!\n"
-        if [ $END_ON_UPLOAD_ERROR -eq 1 ]; then
-            remove_temp_files
-            exit 1
-        fi
-    else
-        print " OK\n"
-    fi
-}
-
-#Recursively upload a directory structure
-# $1 = remote destination folder
-function dropbox_upload_dir
-{
-    for i in *; do
-
-        if [ -f "$i" ]; then
-            dropbox_upload "$i" "$1"
-        fi
-
-        if [ -d "$i" ]; then
-            local OLD_PWD=$(pwd)
-            cd "$i"
-            dropbox_upload_dir "$1/$i"
-            cd "$OLD_PWD"
-        fi
-    done
-}
-
-
-#Handles the keyboard interrupt (control-c)
-function ctrl_c
-{
-    print "\n Bye ;)\n"
+    echo -e "\t upload   [LOCAL_FILE]  <REMOTE_FILE>"
+    echo -e "\t download [REMOTE_FILE] <LOCAL_FILE>"
+    echo -e "\t info"
+    echo -e "\t unlink"
+    
+    echo -en "\nFor more info and examples, please see the README file.\n\n"
     remove_temp_files
     exit 1
 }
-
-#Trap keyboard interrupt (control-c)
-trap ctrl_c SIGINT
 
 #CHECK DEPENDENCIES
 for i in $BIN_DEPS; do
@@ -153,141 +102,271 @@ for i in $BIN_DEPS; do
     fi
 done
 
-#USAGE
-function usage() {
-    echo -e "Dropbox Uploader v$VERSION"
-    echo -e "Usage: $0 [OPTIONS]..."
-    echo -e "\nOptions:"
-    echo -e "\t-u [USERNAME] (required if not hardcoded)"
-    echo -e "\t-p [PASSWORD]"
-    echo -e "\t-f [FILE/FOLDER] (required)"
-    echo -e "\t-d [REMOTE_FOLDER] (default: /)"
-    echo -e "\t-v Verbose mode"
-
-    remove_temp_files
-}
-
-# File variables
-UPLOAD_FILE=""
-DEST_FOLDER=""
-
-optn=0;
-
-while getopts "u:p:f:d:v" opt; do
-    case $opt in
-        u)
-            LOGIN_EMAIL="$OPTARG"
-            let optn++;;
-        p)
-            LOGIN_PASSWD="$OPTARG"
-            let optn++;;
-        f)
-            UPLOAD_FILE="$OPTARG"
-            let optn++;;
-        d)
-            DEST_FOLDER="$OPTARG"
-            let optn++;;
-        v)
-            VERBOSE=1;;
-        *)
-            usage;
-            exit 0;
-    esac
-done
-
-if [ $optn -lt 1 ] || [ "$LOGIN_EMAIL" == "" ]; then
-	usage;
-	exit 1;
-fi
-
-if [ "$DEST_FOLDER" == "" ]; then
-    DEST_FOLDER="/"
-fi
-
-print "Dropbox Uploader v$VERSION\n"
-
-#CHECK FILE/DIR
-if [ ! -r "$UPLOAD_FILE" ]; then
-    echo -e "Please specify a valid file or directory (-f)"
-    remove_temp_files
-    exit 1
-fi
-
-#Prompt for password
-if [ "$LOGIN_PASSWD" == "" ]; then
-	read -s -p "Password: " LOGIN_PASSWD
-	echo
-fi
-
-#LOAD LOGIN PAGE
-if [ $SKIP_LOADING_LOGIN_PAGE -eq 0 ]; then
-    print " > Loading Login Page..."
-    curl -s --show-error -i -o "$RESPONSE_FILE" "$LOGIN_URL"
-
-    if [ $? -ne 0 ]; then
-        print " Failed!\n"
+#CHECKING FOR AUTH FILE
+if [ -f "$CONFIG_FILE" ]; then
+      
+    #Loading data...
+    APPKEY=$(sed -n -e 's/APPKEY:\([a-z A-Z 0-9]*\)/\1/p' "$CONFIG_FILE")
+    APPSECRET=$(sed -n -e 's/APPSECRET:\([a-z A-Z 0-9]*\)/\1/p' "$CONFIG_FILE")
+    OAUTH_ACCESS_TOKEN_SECRET=$(sed -n -e 's/OAUTH_ACCESS_TOKEN_SECRET:\([a-z A-Z 0-9]*\)/\1/p' "$CONFIG_FILE")
+    OAUTH_ACCESS_TOKEN=$(sed -n -e 's/OAUTH_ACCESS_TOKEN:\([a-z A-Z 0-9]*\)/\1/p' "$CONFIG_FILE")
+    
+    #Checking the loaded data
+    if [ -z "$APPKEY" -o -z "$APPSECRET" -o -z "$OAUTH_ACCESS_TOKEN_SECRET" -o -z "$OAUTH_ACCESS_TOKEN" ]; then
+        echo -ne "Error loading data from $CONFIG_FILE...\n"
+        echo -ne "Is recommended to run $0 unlink\n"
         remove_temp_files
         exit 1
+    fi
+
+#NEW SETUP...
+else
+
+    echo -ne "\n This is the first time you run this script.\n"
+    echo -ne " Please open this URL from your Browser, and access using your account:\n\n -> $APP_CREATE_URL\n"
+    echo -ne "\n If you haven't already done, click \"Create an App\" and fill in the\n"
+    echo -ne " form with the following data:\n\n"
+    echo -ne "  App name: MyUploader$RANDOM$RANDOM\n"
+    echo -ne "  Description: What do you want...\n"
+    echo -ne "  Access level: Full Dropbox\n\n"
+    echo -ne " Now, click on the \"Create\" button.\n\n"
+    
+    echo -ne " When your new App is successfully created, please insert the\n"
+    echo -ne " App Key and App Secret:\n\n"
+
+    #Getting the app key and secret from the user
+    while (true); do
+        
+        echo -n " # App key: "
+        read APPKEY
+
+        echo -n " # App secret: "
+        read APPSECRET
+
+        echo -ne "\n > App key is $APPKEY and App secret is $APPSECRET, it's ok? [y/n]"
+        read answer
+        if [ "$answer" == "y" ]; then
+            break;
+        fi
+
+    done
+
+    #TOKEN REQUESTS
+    echo -ne "\n > Token request... "
+    time=$(utime)
+    curl -s --show-error -i -o $RESPONSE_FILE --data "oauth_consumer_key=$APPKEY&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26&oauth_timestamp=$time&oauth_nonce=$RANDOM" "$API_REQUEST_TOKEN_URL"
+    OAUTH_TOKEN_SECRET=$(sed -n -e 's/oauth_token_secret=\([a-z A-Z 0-9]*\).*/\1/p' "$RESPONSE_FILE")
+    OAUTH_TOKEN=$(sed -n -e 's/.*oauth_token=\([a-z A-Z 0-9]*\)/\1/p' "$RESPONSE_FILE")
+
+    if [ -n "$OAUTH_TOKEN" -a -n "$OAUTH_TOKEN_SECRET" ]; then
+        echo -ne "OK\n"
     else
-        print " OK\n"
-    fi
-
-    #GET TOKEN
-    TOKEN=$(get_token "$RESPONSE_FILE" "\/login")
-    #echo -e " > Token = $TOKEN"
-    if [ "$TOKEN" == "" ]; then
-        print " Failed to get Authentication token!\n"
+        echo -ne " FAILED\n\n Verify your App key and secret...\n\n"
         remove_temp_files
         exit 1
     fi
+
+    while (true); do
+
+        #USER AUTH
+        echo -ne "\n Please visit this URL from your Browser, and allow Dropbox Uploader\n"
+        echo -ne " to access your DropBox account:\n\n --> ${API_USER_AUTH_URL}?oauth_token=$OAUTH_TOKEN\n"
+        echo -ne "\nPress enter when done...\n"
+        read
+
+        #API_ACCESS_TOKEN_URL
+        echo -ne " > Access Token request... "
+        time=$(utime)
+        curl -s --show-error -i -o $RESPONSE_FILE --data "oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM" "$API_ACCESS_TOKEN_URL"
+        OAUTH_ACCESS_TOKEN_SECRET=$(sed -n -e 's/oauth_token_secret=\([a-z A-Z 0-9]*\)&.*/\1/p' "$RESPONSE_FILE")
+        OAUTH_ACCESS_TOKEN=$(sed -n -e 's/.*oauth_token=\([a-z A-Z 0-9]*\)&.*/\1/p' "$RESPONSE_FILE")
+        OAUTH_ACCESS_UID=$(sed -n -e 's/.*uid=\([0-9]*\)/\1/p' "$RESPONSE_FILE")
+        
+        if [ "$OAUTH_ACCESS_TOKEN" != "" -a "$OAUTH_ACCESS_TOKEN_SECRET" != "" -a "$OAUTH_ACCESS_UID" != "" ]; then
+            echo -ne "OK\n"
+            
+            #Saving data
+            echo "APPKEY:$APPKEY" > "$CONFIG_FILE"
+            echo "APPSECRET:$APPSECRET" >> "$CONFIG_FILE"
+            echo "OAUTH_ACCESS_TOKEN:$OAUTH_ACCESS_TOKEN" >> "$CONFIG_FILE"
+            echo "OAUTH_ACCESS_TOKEN_SECRET:$OAUTH_ACCESS_TOKEN_SECRET" >> "$CONFIG_FILE"
+            
+            echo -ne "\n Setup completed!\n"
+            break
+        else
+            print " FAILED\n"
+        fi
+
+    done;
+    
+    remove_temp_files     
+    exit 0
 fi
 
-#LOGIN
-print " > Logging in..."
-curl -s --show-error -i -c $COOKIE_FILE -o $RESPONSE_FILE --data "login_email=$LOGIN_EMAIL&login_password=$LOGIN_PASSWD&t=$TOKEN" "$LOGIN_URL"
-grep "location: /home" $RESPONSE_FILE > /dev/null
+COMMAND=$1
 
-if [ $? -ne 0 ]; then
-    print " Failed!\n"
-    remove_temp_files
-    exit 1
-else
-    print " OK\n"
-fi
+#CHECKING PARAMS VALUES
+case $COMMAND in
 
-#LOAD HOME
-print " > Loading Home..."
-curl -s --show-error -i -b "$COOKIE_FILE" -o "$RESPONSE_FILE" "$HOME_URL"
+upload)
 
-if [ $? -ne 0 ]; then
-    print " Failed!\n"
-    remove_temp_files
-    exit 1
-else
-    print " OK\n"
-fi
+    FILE_SRC=$2
+    FILE_DST=$(urlencode "$3")
 
-#GET TOKEN
-TOKEN=$(get_token "$RESPONSE_FILE" "https:\/\/dl-web.dropbox.com\/upload")
-#echo -e " > Token = $TOKEN"
-if [ "$TOKEN" == "" ]; then
-    print " Failed to get Upload token!\n"
-    remove_temp_files
-    exit 1
-fi
+    #Checking FILE_SRC
+    if [ ! -f "$FILE_SRC" ]; then
+        echo -e "Please specify a valid source file!"
+        remove_temp_files
+        exit 1
+    fi
+    
+    #Checking FILE_DST
+    if [ -z "$FILE_DST" ]; then
+        FILE_DST=$(basename "$FILE_SRC")
+    fi    
+    
+    ;;
 
-#If it's a single file...
-if [ -f "$UPLOAD_FILE" ]; then
-    dropbox_upload "$UPLOAD_FILE" "$DEST_FOLDER"
-fi
+download)
 
-#If it's a directory...
-if [ -d "$UPLOAD_FILE" ]; then
-    OLD_PWD=$(pwd)
-    cd "$UPLOAD_FILE"
-    dropbox_upload_dir "$DEST_FOLDER"
-    cd "$OLD_PWD"
-fi
+    FILE_SRC=$(urlencode "$2")
+    FILE_DST=$3    
 
+    #Checking FILE_SRC
+    if [ -z "$FILE_SRC" ]; then
+        echo -e "Please specify a valid source file!"
+        remove_temp_files
+        exit 1
+    fi
+    
+    #Checking FILE_DST
+    if [ -z "$FILE_DST" ]; then
+        FILE_DST=$(basename "$FILE_SRC")
+    fi
+    
+    ;;
+    
+info)
+    #Nothing to do...
+    ;;
+
+unlink)
+    #Nothing to do...
+    ;;
+        
+*)
+    usage
+    ;;
+esac
+
+################
+#### START  ####
+################
+
+#COMMAND EXECUTION
+case "$COMMAND" in
+
+    upload)
+
+        #Show the progress bar during the file upload
+        if [ $VERBOSE -eq 1 ]; then
+	        CURL_PARAMETERS="--progress-bar"
+        else
+	        CURL_PARAMETERS="-s --show-error"
+        fi
+     
+        print " > Uploading $FILE_SRC to $FILE_DST... \n"  
+        time=$(utime)
+        curl $CURL_PARAMETERS -i -o "$RESPONSE_FILE" --upload-file "$FILE_SRC" "$API_UPLOAD_URL/$FILE_DST?oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM"
+        
+        #Check
+        grep "HTTP/1.1 200 OK" "$RESPONSE_FILE" > /dev/null
+        if [ $? -eq 0 ]; then
+            print " > DONE\n"
+        else
+            print " > ERROR\n"
+            print "   NB: If the problem persists, try to unlink this script from your\n"
+            print "   Dropbox account, then setup again ($0 unlink).\n"
+            remove_temp_files
+            exit 1
+        fi
+        
+        ;;
+
+
+    download)
+
+        #Show the progress bar during the file download
+        if [ $VERBOSE -eq 1 ]; then
+	        CURL_PARAMETERS="--progress-bar"
+        else
+	        CURL_PARAMETERS="-s --show-error"
+        fi
+     
+        print " > Downloading $FILE_SRC to $FILE_DST... \n"  
+        time=$(utime)
+        curl $CURL_PARAMETERS -D "$RESPONSE_FILE" -o "$FILE_DST" "$API_DOWNLOAD_URL/$FILE_SRC?oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM"
+               
+        #Check
+        grep "HTTP/1.1 200 OK" "$RESPONSE_FILE" > /dev/null
+        if [ $? -eq 0 ]; then
+            print " > DONE\n"
+        else
+            print " > ERROR\n"
+            print "   NB: If the problem persists, try to unlink this script from your\n"
+            print "   Dropbox account, then setup again ($0 unlink).\n"
+            rm -fr "$FILE_DST"
+            remove_temp_files
+            exit 1
+        fi
+         
+        ;;
+
+
+    info)
+     
+        print "Dropbox Uploader v$VERSION\n\n"
+        print " > Getting info... \n"  
+        time=$(utime)
+        CURL_PARAMETERS="-s --show-error"
+        curl $CURL_PARAMETERS -i -o "$RESPONSE_FILE" --data "oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM" "$API_INFO_URL"
+   
+        echo -ne "\nName:\t"
+        sed -n -e 's/.*\"display_name\":\s*\"*\([^"]*\)\",.*/\1/p' "$RESPONSE_FILE"
+
+        echo -ne "\nUID:\t"
+        sed -n -e 's/.*\"uid\":\s*\"*\([^"]*\)\"*,.*/\1/p' "$RESPONSE_FILE"
+
+        echo -ne "\nEmail:\t"
+        sed -n -e 's/.*\"email\":\s*\"*\([^"]*\)\"*.*/\1/p' "$RESPONSE_FILE"
+        
+        echo -ne "\nQuota:\t"
+        sed -n -e 's/.*\"quota\":\s*\([0-9]*\).*/\1/p' "$RESPONSE_FILE"
+
+        echo -ne "\nUsed:\t"
+        sed -n -e 's/.*\"normal\":\s*\([0-9]*\).*/\1/p' "$RESPONSE_FILE"
+                
+        echo ""
+               
+        ;;
+
+
+    unlink)
+
+        echo -ne "\n Are you sure you want unlink this script from your Dropbox account? [y/n]"
+        read answer
+        if [ "$answer" == "y" ]; then
+            rm -fr "$CONFIG_FILE"
+            echo -ne "Done!\n"
+        fi
+        
+        ;;
+                
+    *)
+        usage
+        ;;
+        
+esac
 
 remove_temp_files
+exit 0

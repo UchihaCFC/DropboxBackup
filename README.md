@@ -13,6 +13,7 @@ Installation
 ------------
 1. Copy dropboxbackup.sh to a dir on your system and fill the configuration fields.
 2. Get the latest [dropbox_uploader.sh](https://github.com/andreafabrizi/Dropbox-Uploader) or use the included one.
+3. Run dropbox_uploader.sh so you can set up the authentication to your Dropbox.
 3. Add the script to your crontab so it runs periodically.
 4. Enjoy automated backups to your Dropbox!
 
